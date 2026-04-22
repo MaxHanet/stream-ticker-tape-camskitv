@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Stream Ticker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&family=IBM+Plex+Sans:wght@300;700&display=swap">
+  <style>
+    /* ---------- CONFIG via CSS variables ---------- */
+    :root {
+      --bar-height: 40px;
+      --scroll-duration: 90s;
+      /* lower = faster */
+      --bg: #100A23;
+      --fg: #ffffff;
+
+      /* Brand colors — solid hex for text, rgba at 30% for flash background */
+      --up-solid: #0DFF00;
+      --down-solid: #FF0000;
+      --up-flash: rgba(13, 255, 0, 0.30);
+      --down-flash: rgba(255, 0, 0, 0.30);
+
+      --muted: #9ca3af;
+      --gap: 48px;
+
+      --flash-duration: 1.2s;
+      /* how long the background tint lingers */
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      /* transparent for OBS browser source */
+      overflow: hidden;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+
+    .ticker-bar {
+      position: fixed;
+      left: 0;
+      bottom: 0;
+      width: 100%;
+      height: var(--bar-height);
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .track {
+      display: flex;
+      gap: var(--gap);
+      padding-left: var(--gap);
+      animation: scroll var(--scroll-duration) linear infinite;
+      will-change: transform;
+    }
+
+    /* pause animation while data is loading to avoid a janky empty scroll */
+    .track.paused {
+      animation-play-state: paused;
+    }
+
+    @keyframes scroll {
+      from {
+        transform: translateX(0);
+      }
+
+      to {
+        transform: translateX(-50%);
+      }
+    }
+
+    .item {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      color: var(--fg);
+      letter-spacing: 0.2px;
+    }
+
+    .symbol {
+      font-family: 'IBM Plex Sans', sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    .price {
+      font-family: 'IBM Plex Sans', sans-serif;
+      font-weight: 300;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pct {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 13px;
+      font-weight: 400;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      background: transparent;
+      transition: background-color 0.4s ease-out;
+    }
+
+    .pct.up {
+      color: var(--up-solid);
+    }
+
+    .pct.down {
+      color: var(--down-solid);
+    }
+
+    .pct.flat {
+      color: var(--muted);
+    }
+
+    /* Flash classes: applied briefly when a price changes, then removed */
+    .pct.flash-up {
+      animation: flashUp var(--flash-duration) ease-out;
+    }
+
+    .pct.flash-down {
+      animation: flashDown var(--flash-duration) ease-out;
+    }
+
+    @keyframes flashUp {
+      0% {
+        background-color: var(--up-flash);
+      }
+
+      100% {
+        background-color: transparent;
+      }
+    }
+
+    @keyframes flashDown {
+      0% {
+        background-color: var(--down-flash);
+      }
+
+      100% {
+        background-color: transparent;
+      }
+    }
+
+    .loading {
+      color: var(--muted);
+      font-size: 13px;
+      padding-left: var(--gap);
+      font-style: italic;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="ticker-bar" id="bar">
+    <div class="track paused" id="track">
+      <span class="loading">Loading market data…</span>
+    </div>
+  </div>
+
+  <script>
+    /* =========================================================
+       CONFIG — edit this list to change what shows on the ticker.
+       type: "crypto" uses CoinGecko (free, no key).
+       type: "stock"  uses Finnhub (free tier, needs API key).
+       ========================================================= */
+
+    const FINNHUB_KEY = "d7kdcfpr01qiqbctuscgd7kdcfpr01qiqbctusd0";   // <-- paste your free Finnhub key
+    const REFRESH_MS = 4 * 60 * 1000;              // 4 minutes
+
+    const ASSETS = [
+      // type: "crypto" uses CoinGecko (free, no key). id = CoinGecko coin id.
+      // type: "stock"  uses Finnhub. id = ticker, with exchange suffix for non-US
+      //                (e.g. "MC.PA" for Euronext Paris).
+      // label (optional) = what shows on the ticker; defaults to id if omitted.
+
+      // --- Crypto ---
+      { type: "crypto", label: "BTC", id: "bitcoin" },
+      { type: "crypto", label: "ETH", id: "ethereum" },
+      { type: "crypto", label: "SOL", id: "solana" },
+      { type: "crypto", label: "HYPE", id: "hyperliquid" },
+      { type: "crypto", label: "ZEC", id: "zcash" },
+      { type: "crypto", label: "AVAX", id: "avalanche-2" },
+
+      // --- Indices & Commodities (via ETFs) ---
+      { type: "stock", label: "SPY", id: "SPY" },
+      { type: "stock", label: "GOLD", id: "GLD" },
+      { type: "stock", label: "OIL", id: "USO" },
+
+      // --- Stocks ---
+      { type: "stock", label: "APPLE", id: "AAPL" },
+      { type: "stock", label: "NVDA", id: "NVDA" },
+      { type: "stock", label: "GOOGLE", id: "GOOGL" },
+      { type: "stock", label: "AMAZON", id: "AMZN" },
+      { type: "stock", label: "TESLA", id: "TSLA" },
+      { type: "stock", label: "LVMH", id: "MC.PA" },
+      { type: "stock", label: "L'ORÉAL", id: "OR.PA" },
+      { type: "stock", label: "LULULEMON", id: "LULU" },
+      { type: "stock", label: "ESTÉE LAUDER", id: "EL" },
+      { type: "stock", label: "VICTORIA'S SECRET", id: "VSCO" },
+    ];
+
+    /* ========================================================= */
+
+    const trackEl = document.getElementById("track");
+
+    async function fetchCrypto(assets) {
+      const ids = assets.map(a => a.id).join(",");
+      const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("CoinGecko error " + res.status);
+      const data = await res.json();
+      return assets.map(a => {
+        const d = data[a.id];
+        const label = a.label || a.id;
+        if (!d) return { ...a, label, price: null, pct: null };
+        return { ...a, label, price: d.usd, pct: d.usd_24h_change };
+      });
+    }
+
+    async function fetchStock(asset) {
+      const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(asset.id)}&token=${FINNHUB_KEY}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Finnhub error " + res.status);
+      const d = await res.json();
+      // Finnhub returns: c = current, pc = previous close, dp = percent change
+      return { ...asset, label: asset.label || asset.id, price: d.c, pct: d.dp };
+    }
+
+    function formatPrice(p, asset) {
+      if (p == null) return "—";
+      // Euronext stocks quote in EUR; everything else in USD.
+      const isEuronext = asset && asset.type === "stock" && /\.(PA|AS|BR|LS|MI|IR|OL)$/i.test(asset.id);
+      const sym = isEuronext ? "€" : "$";
+      if (p >= 1000) return sym + p.toLocaleString("en-US", { maximumFractionDigits: 0 });
+      if (p >= 1) return sym + p.toLocaleString("en-US", { maximumFractionDigits: 2 });
+      return sym + p.toLocaleString("en-US", { maximumFractionDigits: 4 });
+    }
+
+    function formatPct(p) {
+      if (p == null || isNaN(p)) return { text: "—", cls: "flat" };
+      const sign = p >= 0 ? "+" : "";
+      const cls = p > 0.001 ? "up" : (p < -0.001 ? "down" : "flat");
+      return { text: `${sign}${p.toFixed(2)}%`, cls };
+    }
+
+    function renderItems(items) {
+      // Build one copy of the markup…
+      const html = items.map(it => {
+        const pct = formatPct(it.pct);
+        return `
+      <span class="item" data-key="${it.label}">
+        <span class="symbol">${it.label}</span>
+        <span class="price">${formatPrice(it.price, it)}</span>
+        <span class="pct ${pct.cls}" data-key="${it.label}">${pct.text}</span>
+      </span>
+    `;
+      }).join("");
+
+      // …then duplicate it so the translateX(-50%) loop is seamless.
+      trackEl.innerHTML = html + html;
+      trackEl.classList.remove("paused");
+    }
+
+    // Remember last seen price per asset so we can detect up/down moves.
+    const lastPriceByKey = new Map();
+
+    function flashChangedItems(items) {
+      items.forEach(it => {
+        if (it.price == null) return;
+        const prev = lastPriceByKey.get(it.label);
+        lastPriceByKey.set(it.label, it.price);
+
+        if (prev == null || prev === it.price) return;  // no flash on first load or no change
+
+        const direction = it.price > prev ? "flash-up" : "flash-down";
+
+        // Both duplicates of each pill need the flash so it looks consistent mid-scroll.
+        const pills = trackEl.querySelectorAll(`.pct[data-key="${it.label}"]`);
+        pills.forEach(pill => {
+          pill.classList.remove("flash-up", "flash-down");
+          // Force reflow so the animation can re-trigger on rapid updates
+          void pill.offsetWidth;
+          pill.classList.add(direction);
+        });
+      });
+    }
+
+    async function refresh() {
+      try {
+        const cryptoAssets = ASSETS.filter(a => a.type === "crypto");
+        const stockAssets = ASSETS.filter(a => a.type === "stock");
+
+        const [cryptoResults, ...stockResults] = await Promise.all([
+          cryptoAssets.length ? fetchCrypto(cryptoAssets) : Promise.resolve([]),
+          ...stockAssets.map(fetchStock),
+        ]);
+
+        // Merge back in original order
+        const byKey = new Map();
+        cryptoResults.forEach(r => byKey.set(r.label, r));
+        stockResults.forEach(r => byKey.set(r.label, r));
+        const ordered = ASSETS.map(a => byKey.get(a.label || a.id)).filter(Boolean);
+
+        renderItems(ordered);
+        flashChangedItems(ordered);
+      } catch (err) {
+        console.error("Ticker refresh failed:", err);
+        // Keep the previous render if we already have one; only show error on first fail.
+        if (trackEl.querySelector(".loading")) {
+          trackEl.innerHTML = `<span class="loading">Market data unavailable. Retrying…</span>`;
+        }
+      }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+
+</html>
