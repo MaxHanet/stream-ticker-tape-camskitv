@@ -182,7 +182,7 @@
        ========================================================= */
 
     const FINNHUB_KEY = "d7kei3hr01qiqbcu33j0d7kei3hr01qiqbcu33jg";   // <-- paste your free Finnhub key
-    const REFRESH_MS = 4 * 60 * 1000;              // 4 minutes
+    const CYCLE_MS = 60 * 1000;                  // Full cycle length (all assets update once per CYCLE_MS)
 
     const ASSETS = [
       // type: "crypto" uses CoinGecko (free, no key). id = CoinGecko coin id.
@@ -209,8 +209,8 @@
       { type: "stock", label: "GOOGLE", id: "GOOGL" },
       { type: "stock", label: "AMAZON", id: "AMZN" },
       { type: "stock", label: "TESLA", id: "TSLA" },
-      { type: "stock", label: "ROBINHOOD", id: "HOOD" },
-      { type: "stock", label: "BIRKENSTOCK", id: "BIRK" },
+      { type: "stock", label: "LVMH", id: "MC.PA" },
+      { type: "stock", label: "L'ORÉAL", id: "OR.PA" },
       { type: "stock", label: "LULULEMON", id: "LULU" },
       { type: "stock", label: "ESTÉE LAUDER", id: "EL" },
       { type: "stock", label: "VICTORIA'S SECRET", id: "VSCO" },
@@ -281,28 +281,46 @@
     // Remember last seen price per asset so we can detect up/down moves.
     const lastPriceByKey = new Map();
 
-    function flashChangedItems(items) {
-      items.forEach(it => {
-        if (it.price == null) return;
-        const prev = lastPriceByKey.get(it.label);
-        lastPriceByKey.set(it.label, it.price);
-
-        if (prev == null || prev === it.price) return;  // no flash on first load or no change
-
-        const direction = it.price > prev ? "flash-up" : "flash-down";
-
-        // Both duplicates of each pill need the flash so it looks consistent mid-scroll.
-        const pills = trackEl.querySelectorAll(`.pct[data-key="${it.label}"]`);
-        pills.forEach(pill => {
-          pill.classList.remove("flash-up", "flash-down");
-          // Force reflow so the animation can re-trigger on rapid updates
-          void pill.offsetWidth;
-          pill.classList.add(direction);
-        });
+    function flashPills(label, direction) {
+      // Both duplicates of each pill need the flash so it looks consistent mid-scroll.
+      const pills = trackEl.querySelectorAll(`.pct[data-key="${CSS.escape(label)}"]`);
+      pills.forEach(pill => {
+        pill.classList.remove("flash-up", "flash-down");
+        // Force reflow so the animation can re-trigger on rapid updates
+        void pill.offsetWidth;
+        pill.classList.add(direction);
       });
     }
 
-    async function refresh() {
+    function updatePillContent(asset, result) {
+      const label = asset.label || asset.id;
+      const pct = formatPct(result.pct);
+      const priceStr = formatPrice(result.price, asset);
+
+      // Update both rendered copies (the marquee duplicates every item)
+      document.querySelectorAll(`.item[data-key="${CSS.escape(label)}"]`).forEach(item => {
+        const priceEl = item.querySelector(".price");
+        const pctEl = item.querySelector(".pct");
+        if (priceEl) priceEl.textContent = priceStr;
+        if (pctEl) {
+          pctEl.textContent = pct.text;
+          pctEl.classList.remove("up", "down", "flat");
+          pctEl.classList.add(pct.cls);
+        }
+      });
+    }
+
+    function maybeFlash(label, newPrice) {
+      if (newPrice == null) return;
+      const prev = lastPriceByKey.get(label);
+      lastPriceByKey.set(label, newPrice);
+      if (prev == null || prev === newPrice) return;  // no flash on first load or unchanged
+      flashPills(label, newPrice > prev ? "flash-up" : "flash-down");
+    }
+
+    // --- Initial full render so the bar shows something immediately --------------
+
+    async function initialRender() {
       try {
         const cryptoAssets = ASSETS.filter(a => a.type === "crypto");
         const stockAssets = ASSETS.filter(a => a.type === "stock");
@@ -312,25 +330,74 @@
           ...stockAssets.map(fetchStock),
         ]);
 
-        // Merge back in original order
         const byKey = new Map();
         cryptoResults.forEach(r => byKey.set(r.label, r));
         stockResults.forEach(r => byKey.set(r.label, r));
-        const ordered = ASSETS.map(a => byKey.get(a.label || a.id)).filter(Boolean);
+        const ordered = ASSETS.map(a => byKey.get(a.label || a.id) || { ...a, label: a.label || a.id, price: null, pct: null });
 
         renderItems(ordered);
-        flashChangedItems(ordered);
+        // Seed lastPriceByKey so the first staggered update doesn't flash everything
+        ordered.forEach(it => { if (it.price != null) lastPriceByKey.set(it.label, it.price); });
       } catch (err) {
-        console.error("Ticker refresh failed:", err);
-        // Keep the previous render if we already have one; only show error on first fail.
+        console.error("Initial render failed:", err);
         if (trackEl.querySelector(".loading")) {
           trackEl.innerHTML = `<span class="loading">Market data unavailable. Retrying…</span>`;
         }
       }
     }
 
-    refresh();
-    setInterval(refresh, REFRESH_MS);
+    // --- Per-slot update (one slot = one asset or the crypto batch) --------------
+
+    async function updateSlot(slot) {
+      try {
+        if (slot.type === "crypto-batch") {
+          const results = await fetchCrypto(slot.assets);
+          results.forEach(r => {
+            const original = slot.assets.find(a => (a.label || a.id) === r.label);
+            updatePillContent(original, r);
+            maybeFlash(r.label, r.price);
+          });
+        } else {
+          const asset = slot.asset;
+          const result = await fetchStock(asset);
+          updatePillContent(asset, result);
+          maybeFlash(result.label, result.price);
+        }
+      } catch (err) {
+        // Silent fail on individual slots — the previous values stay visible.
+        console.warn("Slot update failed:", slot, err);
+      }
+    }
+
+    // --- Scheduler: space out slot updates evenly across CYCLE_MS ----------------
+
+    function startStaggeredUpdates() {
+      const cryptoAssets = ASSETS.filter(a => a.type === "crypto");
+      const stockAssets = ASSETS.filter(a => a.type === "stock");
+
+      // Build the slot list: one batched crypto slot + one slot per stock
+      const slots = [];
+      if (cryptoAssets.length) slots.push({ type: "crypto-batch", assets: cryptoAssets });
+      stockAssets.forEach(asset => slots.push({ type: "stock", asset }));
+
+      // Space them evenly across the cycle
+      const interval = CYCLE_MS / slots.length;
+
+      slots.forEach((slot, i) => {
+        // Kick off each slot at its staggered offset, then repeat every CYCLE_MS
+        setTimeout(() => {
+          updateSlot(slot);
+          setInterval(() => updateSlot(slot), CYCLE_MS);
+        }, i * interval);
+      });
+    }
+
+    // --- Boot --------------------------------------------------------------------
+
+    (async () => {
+      await initialRender();
+      startStaggeredUpdates();
+    })();
   </script>
 </body>
 
