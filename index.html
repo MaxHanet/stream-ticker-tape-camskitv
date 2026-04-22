@@ -9,7 +9,7 @@
 <style>
   /* ---------- CONFIG via CSS variables ---------- */
   :root {
-    --bar-height: 40px;
+    --bar-height: 49px;
     --scroll-duration: 90s;        /* lower = faster */
     --bg: #100A23;
     --fg: #ffffff;
@@ -39,15 +39,17 @@
   .ticker-bar {
     position: fixed;
     left: 0;
-    bottom: 0;
+    bottom: 2px;
     width: 100%;
     height: var(--bar-height);
     background: var(--bg);
-    box-shadow: 0 -2px 0 0 #FFFFFF, 0 2px 0 0 #FFFFFF;
+    border-top: 2px solid #FFFFFF;
+    border-bottom: 2px solid #FFFFFF;
     display: flex;
     align-items: center;
     overflow: hidden;
     white-space: nowrap;
+    box-sizing: content-box;
   }
 
   .track {
